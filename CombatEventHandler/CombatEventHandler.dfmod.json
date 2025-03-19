@@ -7,7 +7,7 @@
     "ModDescription": "Adds events to the combat system that other mods can subscribe to.",
     "GUID": "fb086c76-38e7-4d83-91dc-f29e6f1bb17e",
     "Files": [
-        "Assets/Game/Mods/CombatEventHandler/Scripts/CombatEventHandler.cs",
-        "Assets/Game/Mods/CombatEventHandler/CombatEventHandler.dfmod.json"
-    ]
+        "Assets/Game/Mods/CombatEventHandler/Scripts/CombatEventHandler.cs"
+    ],
+    "ModPreCompile": true
 }

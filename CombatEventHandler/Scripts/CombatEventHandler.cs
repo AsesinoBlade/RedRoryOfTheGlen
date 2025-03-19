@@ -10,10 +10,17 @@ using DaggerfallWorkshop.Game.Utility.ModSupport;
 using DaggerfallWorkshop.Game.MagicAndEffects;
 using DaggerfallConnect;
 using DaggerfallWorkshop.Game.MagicAndEffects.MagicEffects;
+using DaggerfallWorkshop.Game.Utility.ModSupport.ModSettings;
 
 public class CombatEventHandler : MonoBehaviour
 {
     static Mod mod;
+    static int criticalDamageBasePlayer = 2;
+    static int criticalDamageBaseEnemy = 2;
+    static int playerDivideBy = 5;
+    static int enemyDivideBy = 7;
+    private static bool showCritMessage = false;
+    private static bool IgnoreMaterialOfEnchantedWeapons = true;
 
     [Invoke(StateManager.StateTypes.Start, 0)]
 
@@ -49,6 +56,22 @@ public class CombatEventHandler : MonoBehaviour
         mod.IsReady = true;
     }
 
+    void UpdateCriticalHitsSettings()
+    {
+        Mod chMod = ModManager.Instance.GetMod("Critical Hits");
+        if (chMod != null)
+        {
+            ModSettings settings = chMod.GetSettings();
+
+            criticalDamageBasePlayer = settings.GetValue<int>("criticalHits", "criticalDamageBasePlayer");
+            criticalDamageBaseEnemy = settings.GetValue<int>("criticalHits", "criticalDamageBaseEnemy");
+            playerDivideBy = settings.GetValue<int>("criticalHits", "playerChance");
+            enemyDivideBy = settings.GetValue<int>("criticalHits", "enemyChance");
+            showCritMessage = settings.GetBool("criticalHits", "showCritMessage");
+            IgnoreMaterialOfEnchantedWeapons = settings.GetValue<bool>("Options", "IgnoreMaterialOfEnchantedWeapons");
+        }
+    }
+
     void MessageReceiver(string message, object data, DFModMessageCallback callBack)
     {
         switch (message)
@@ -62,12 +85,40 @@ public class CombatEventHandler : MonoBehaviour
             case "onSavingThrow":
                 OnSavingThrow += data as Action<DFCareer.Elements, DFCareer.EffectFlags, DaggerfallEntity, int>;
                 break;
+            case "UpdateSettings":
+                if (data is bool)
+                {
+                    UpdateCriticalHitsSettings();
+                }
+                break;
 
             default:
                 Debug.LogErrorFormat("{0}: unknown message received ({1}).", this, message);
                 break;
         }
     }
+
+    private static bool IsCriticalStrike(DaggerfallEntity attacker)
+    {
+        PlayerEntity player = GameManager.Instance.PlayerEntity;
+        var attackerLuckBonus = (int)Mathf.Floor(attacker.Stats.LiveLuck / 10);
+        var criticalStrikeSkill = attacker.Skills.GetLiveSkillValue(DFCareer.Skills.CriticalStrike);
+        var divider = (attacker == player) ? playerDivideBy : enemyDivideBy;
+        var criticalChance = (criticalStrikeSkill / divider) + attackerLuckBonus;
+
+#if UNITY_EDITOR
+        Debug.LogFormat("{0} Critical chance: {1}. Skill: {2}/{3} + {4}", attacker.Name, criticalChance, criticalStrikeSkill, divider, attackerLuckBonus);
+#endif
+        return Dice100.SuccessRoll(criticalChance); // Player has a 25% chance of critting at level 100. 32% with 75 luck, and 45% with 100 luck.
+    }
+
+    private static int GetCritDamage(int playerSkill, int baseCritDamage)
+    {
+        var critDamage = playerSkill < 98 ? Mathf.RoundToInt(playerSkill / 25) : 6;
+
+        return critDamage * baseCritDamage;
+    }
+
 
     //VCEH - Default CalculateAttackDamage formula from FormulaHelper
     //VCEH - Add calls to events before every return
@@ -82,6 +133,10 @@ public class CombatEventHandler : MonoBehaviour
         int backstabChance = 0;
         PlayerEntity player = GameManager.Instance.PlayerEntity;
         short skillID = 0;
+        bool critSuccess = false;
+        int critBonusDamage = 0;
+        int critHitAddi = 0;
+
 
         // Choose whether weapon-wielding enemies use their weapons or weaponless attacks.
         // In classic, weapon-wielding enemies use the damage values of their weapons
@@ -105,7 +160,13 @@ public class CombatEventHandler : MonoBehaviour
         if (weapon != null)
         {
             // If the attacker is using a weapon, check if the material is high enough to damage the target
-            if (target.MinMetalToHit > (WeaponMaterialTypes)weapon.NativeMaterialValue)
+            var isEnchanted = weapon.IsEnchanted ||
+                              (weapon.poisonType != Poisons.None && !target.IsImmuneToDisease);
+            if (!IgnoreMaterialOfEnchantedWeapons)
+                isEnchanted = false;
+
+
+            if (!isEnchanted && target.MinMetalToHit > (WeaponMaterialTypes)weapon.NativeMaterialValue)
             {
                 if (attacker == player)
                 {
@@ -128,6 +189,33 @@ public class CombatEventHandler : MonoBehaviour
         }
 
         chanceToHitMod = attacker.Skills.GetLiveSkillValue(skillID);
+        // Handle critical hit damage
+
+
+        critSuccess = IsCriticalStrike(attacker);
+
+        if (critSuccess)
+        {
+            int criticalStrikeSkill = attacker.Skills.GetLiveSkillValue(DFCareer.Skills.CriticalStrike);
+            critHitAddi = (criticalStrikeSkill / 4);
+            chanceToHitMod += critHitAddi;
+            if (attacker == player)
+            {
+                if (showCritMessage) DaggerfallUI.Instance.PopupMessage("You strike with precision!");
+                critBonusDamage = GetCritDamage(criticalStrikeSkill, criticalDamageBasePlayer);
+            }
+            else
+            {
+                critBonusDamage = GetCritDamage(criticalStrikeSkill, criticalDamageBaseEnemy);
+            }
+#if UNITY_EDITOR
+            Debug.LogFormat("1. critical strike bonus damage: {0}", critBonusDamage);
+            Debug.LogFormat("2. critical strike bonus toHit: {0}", critHitAddi);
+            Debug.LogFormat("3. Final toHit: {0}", chanceToHitMod);
+#endif
+        }
+
+
 
         if (attacker == player)
         {
@@ -230,10 +318,21 @@ public class CombatEventHandler : MonoBehaviour
             if (damage > 0 && weapon.poisonType != Poisons.None)
             {
                 FormulaHelper.InflictPoison(attacker, target, weapon.poisonType, false);
-                weapon.poisonType = Poisons.None;
+                if (FormulaHelper.ShouldClearWeaponPoison(attacker, player))
+                    FormulaHelper.RemovePoison(attacker, weapon);
             }
         }
+#if UNITY_EDITOR
+        Debug.LogFormat("Standard Damage = {0}", damage);
+#endif
 
+        if (critSuccess)
+        {
+            damage += critBonusDamage;
+#if UNITY_EDITOR
+            Debug.LogFormat("Critical damage = {0}", damage);
+#endif
+        }
         damage = Mathf.Max(0, damage);
 
         FormulaHelper.DamageEquipment(attacker, target, damage, weapon, struckBodyPart);
